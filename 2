@@ -1,0 +1,237 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <cmath>
+
+using namespace std;
+
+int main()
+{
+    setlocale(LC_ALL, "Russian");
+
+
+    ifstream fin("C:/Users/agh09/source/repos/ConsoleApplication1/x64/Debug/matr.txt");//меняем---
+
+    if (!fin.is_open())
+    {
+        cout << "Ошибка: файл matr.txt не найден!\n";
+        return 1;
+    }
+
+    int n; //размер
+
+    fin >> n;
+
+    vector<vector<long double>> A(n,vector<long double>(n));
+
+    vector<long double> b(n);
+
+
+    for (int i = 0; i < n; i++) // матрица А
+    {
+        for (int j = 0; j < n; j++)
+        {
+            fin >> A[i][j];
+        }
+    }
+
+
+    for (int i = 0; i < n; i++) // вектор b
+    {
+        fin >> b[i];
+    }
+
+    fin.close();
+
+    vector<vector<long double>> A_original = A;
+    vector<long double> b_original = b;
+
+
+                            // МЕТОД ОТРАЖЕНИЙ
+
+    for (int k = 0; k < n; k++)
+    {
+
+       
+    // Вычисляем норму k-го столбца
+
+        long double norm = 0.0;
+
+        for (int i = k; i < n; i++)
+        {
+            norm += A[i][k] * A[i][k];
+        }
+
+        norm = sqrtl(norm);
+
+
+        
+
+        if (norm < 1e-18)   // Если столбец практически нулевой
+        {
+            continue;
+        }
+
+
+        
+
+        vector<long double> v(n - k);   // Создаём вектор v
+
+        for (int i = k; i < n; i++)
+        {
+            v[i - k] = A[i][k];
+        }
+
+
+        
+        // Выбираем знак для устойчивости
+
+        if (v[0] >= 0.0)
+        {
+            v[0] += norm;
+        }
+        else
+        {
+            v[0] -= norm;
+        }
+
+
+        long double vTv = 0.0;    // вычислем v^T * v
+
+        for (int i = 0; i < n - k; i++)
+        {
+            vTv += v[i] * v[i];
+        }
+
+
+        if (vTv < 1e-30)
+        {
+            continue;
+        }
+
+
+
+                    // A = U * A
+
+        for (int j = k; j < n; j++)
+        {
+            long double vTA = 0.0;
+
+            for (int i = k; i < n; i++)
+            {
+                vTA += v[i - k] * A[i][j];
+            }
+
+
+            long double kof = 2.0 * vTA / vTv;
+
+
+            for (int i = k; i < n; i++)
+            {
+                A[i][j] -= kof * v[i - k];
+            }
+        }
+
+
+        
+                    // b = U * b
+
+        long double vTb = 0.0;
+
+        for (int i = k; i < n; i++)
+        {
+            vTb +=
+                v[i - k] * b[i];
+        }
+
+
+        long double kof =
+            2.0 * vTb / vTv;
+
+
+        for (int i = k; i < n; i++)
+        {
+            b[i] -=
+                kof * v[i - k];
+        }
+    }
+
+
+
+    vector<long double> x(n); // обратная подстановка
+
+    for (int i = n - 1; i >= 0; i--)
+    {
+        long double sum = 0.0;
+
+        for (int j = i + 1; j < n; j++)
+        {
+            sum +=
+                A[i][j] * x[j];
+        }
+
+
+
+        if (fabsl(A[i][i]) < 1e-18) // Проверка диагонального элемента
+        {
+            cout << "Ошибка: матрица имеет неполный ранг.\n";
+            return 1;
+        }
+
+
+        x[i] =
+            (b[i] - sum) / A[i][i];
+    }
+
+
+   
+
+    cout << "\nРешение:\n"; // Вывод
+
+    for (int i = 0; i < n; i++)
+    {
+        cout << "x[" << i + 1 << "] = "
+            << x[i] << '\n';
+    }
+
+
+
+                    // ВЫЧИСЛЕНИЕ НЕВЯЗКИ
+
+
+    long double nevNorm = 0.0;
+
+    for (int i = 0; i < n; i++)
+    {
+        long double sum = 0.0;
+
+        for (int j = 0; j < n; j++)
+        {
+            sum +=
+                A_original[i][j] * x[j];
+        }
+
+
+        long double nev =
+            sum - b_original[i];
+
+
+        nevNorm +=
+            nev * nev;
+    }
+
+
+    nevNorm =
+        sqrtl(nevNorm);
+
+
+
+                // ВЫВОД НЕВЯЗКИ
+   
+
+    cout << "\nНорма невязки ||Ax - b|| = "
+        << nevNorm << '\n';
+
+
+    return 0;
+}
