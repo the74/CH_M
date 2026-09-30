@@ -1,0 +1,26 @@
+MATCH (p1:Person)-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(p2:Person)
+WHERE p1 <> p2 AND id(p1) < id(p2) // исключаем дубликаты пар
+RETURN p1.name AS Actor1, p2.name AS Actor2, count(m) AS MoviesTogether
+ORDER BY MoviesTogether DESC
+LIMIT 10;
+MATCH (p:Person)-[:DIRECTED]->(m:Movie)
+MATCH (p)-[:ACTED_IN]->(m)
+RETURN m.title AS Movie, p.name AS DirectorAndActor;
+MATCH (tom:Person {name: 'Tom Hanks'})-[:ACTED_IN]->(:Movie)<-[:ACTED_IN]-(co_star:Person)
+MATCH (co_star)-[:ACTED_IN]->(:Movie)<-[:ACTED_IN]-(target:Person)
+WHERE target <> tom
+RETURN DISTINCT target.name AS PersonThroughOne;
+MATCH (m:Movie)
+OPTIONAL MATCH (m)<-[:ACTED_IN|DIRECTED|PRODUCED]-(p:Person)
+RETURN m.title AS Movie, count(DISTINCT p) AS TotalPeople
+ORDER BY TotalPeople DESC;
+MATCH (p1:Person {name: 'Актер А'}), (p2:Person {name: 'Актер Б'})
+MATCH path = shortestPath((p1)-[:ACTED_IN|DIRECTED*..15]-(p2))
+RETURN path;
+MATCH (p:Person)-[:ACTED_IN]->(:Movie)<-[:ACTED_IN]-(other:Person)
+WHERE p <> other
+RETURN p.name AS Actor, count(DISTINCT other) AS CoStarsCount
+ORDER BY CoStarsCount DESC
+LIMIT 1;
+MATCH (a1:Person)-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(a2:Person)
+RETURN a1.name, m.title, a2.name;
