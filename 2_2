@@ -1,0 +1,653 @@
+#include <SDL3/SDL.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <cctype>
+#include <algorithm>
+#include <string>
+#include <sstream>
+#include <iomanip>
+
+struct Point { double x, y; int id; };
+
+// ---------- МЕТОД ОТРАЖЕНИЯ ----------
+bool metotrag(std::vector<std::vector<double>> A,
+    std::vector<double> y,
+    std::vector<double>& c) {
+    int m = (int)A.size();
+    int n = m > 0 ? (int)A[0].size() : 0;
+    c.assign(n, 0.0);
+    if (m < n || n == 0) return false;
+
+    std::vector<double> b = y;
+
+    for (int k = 0; k < n; ++k) {
+        double norm = 0;
+        for (int i = k; i < m; ++i) norm += A[i][k] * A[i][k];
+        norm = std::sqrt(norm);
+        if (norm < 1e-14) return false;
+
+        double alpha = (A[k][k] >= 0) ? -norm : norm;
+        double v0 = A[k][k] - alpha;
+
+        std::vector<double> v(m - k);
+        v[0] = v0;
+        double vnorm2 = v0 * v0;
+        for (int i = k + 1; i < m; ++i) {
+            v[i - k] = A[i][k];
+            vnorm2 += v[i - k] * v[i - k];
+        }
+        if (vnorm2 < 1e-30) continue;
+
+        for (int j = k; j < n; ++j) {
+            double dot = 0;
+            for (int i = k; i < m; ++i) dot += v[i - k] * A[i][j];
+            double factor = 2.0 * dot / vnorm2;
+            for (int i = k; i < m; ++i) A[i][j] -= factor * v[i - k];
+        }
+        double dot = 0;
+        for (int i = k; i < m; ++i) dot += v[i - k] * b[i];
+        double factor = 2.0 * dot / vnorm2;
+        for (int i = k; i < m; ++i) b[i] -= factor * v[i - k];
+    }
+
+    for (int i = n - 1; i >= 0; --i) {
+        double sum = b[i];
+        for (int j = i + 1; j < n; ++j) sum -= A[i][j] * c[j];
+        if (std::abs(A[i][i]) < 1e-14) return false;
+        c[i] = sum / A[i][i];
+    }
+    return true;
+}
+
+// ---------- Локальные коэффициенты для одного узла ----------
+std::vector<double> localCoeffsAt(const std::vector<Point>& data, int i,
+    int windowSize, int degree) {
+    int n = (int)data.size(); if (i < 0 || i >= n) return {};
+    int radius = windowSize / 2;
+    int start = std::max(0, i - radius), end = std::min(n - 1, i + radius);
+    int m = end - start + 1;
+    int deg = std::min(degree, m - 1);
+    int cols = deg + 1;
+    if (m < cols || cols == 0) return {};
+
+    std::vector<std::vector<double>> A(m, std::vector<double>(cols, 1.0));
+    std::vector<double> y(m, 0.0);
+    for (int j = start; j <= end; ++j) {
+        double t = data[j].x - data[i].x;
+        int r = j - start;
+        y[r] = data[j].y;
+        double pw = 1.0;
+        for (int k = 1; k <= deg; ++k) {
+            pw *= t;
+            A[r][k] = pw;
+        }
+    }
+
+    std::vector<double> c;
+    return metotrag(A, y, c) ? c : std::vector<double>{};
+}
+
+// ---------- Локальное сглаживание ----------
+std::vector<double> localSmooth(const std::vector<Point>& data,
+    int windowSize, int degree) {
+    int n = (int)data.size();
+    std::vector<double> r(n, 0.0);
+    for (int i = 0; i < n; ++i) {
+        auto c = localCoeffsAt(data, i, windowSize, degree);
+        r[i] = c.empty() ? data[i].y : c[0];
+    }
+    return r;
+}
+
+// ---------- Форматирование ----------
+std::string fmtNum(double v) {
+    if (std::abs(v) < 1e-12) return "0";
+    std::ostringstream oss;
+    if (std::abs(v) >= 1e-3 && std::abs(v) < 1e4)
+        oss << std::fixed << std::setprecision(3) << v;
+    else
+        oss << std::scientific << std::setprecision(2) << v;
+    return oss.str();
+}
+std::string formatPolyEq(const std::vector<double>& c, const std::string& var) {
+    std::string r;
+    for (int i = (int)c.size() - 1; i >= 0; --i) {
+        double v = c[i];
+        if (std::abs(v) < 1e-10) continue;
+        if (!r.empty()) r += (v < 0) ? " - " : " + ";
+        else if (v < 0) r += "-";
+        r += fmtNum(std::abs(v));
+        if (i > 0) {
+            r += "*" + var;
+            if (i > 1) r += "^" + std::to_string(i);
+        }
+    }
+    return r.empty() ? "0" : r;
+}
+
+// ---------- Утилиты ----------
+double niceStep(double range, int ticks) {
+    if (range <= 0) return 1.0;
+    double raw = range / ticks;
+    double mag = std::pow(10.0, std::floor(std::log10(raw)));
+    double nrm = raw / mag;
+    double nice = (nrm < 1.5) ? 1 : (nrm < 3) ? 2 : (nrm < 7) ? 5 : 10;
+    return nice * mag;
+}
+void fillRect(SDL_Renderer* r, float x, float y, float w, float h) {
+    SDL_FRect R{ x, y, w, h }; SDL_RenderFillRect(r, &R);
+}
+void drawRect(SDL_Renderer* r, float x, float y, float w, float h) {
+    SDL_FRect R{ x, y, w, h }; SDL_RenderRect(r, &R);
+}
+
+// ---------- Состояние ----------
+struct InputField { std::string text; SDL_FRect rect; };
+
+struct AppState {
+    std::vector<Point> data;
+    std::vector<double> smoothed;
+    int windowSize = 5, degree = 2;
+    double xmin = 0, xmax = 10, ymin = 0, ymax = 10;
+    int draggedId = -1, nextId = 0;
+    int hoveredNodeId = -1, hoveredRow = -1;
+    InputField fieldX, fieldY;
+    int focusedField = 0;
+    SDL_FRect addButtonRect{}, clearButtonRect{};
+    int scrollOffset = 0;
+};
+
+void sortData(AppState& s) {
+    std::sort(s.data.begin(), s.data.end(),
+        [](const Point& a, const Point& b) { return a.x < b.x; });
+}
+void recomputeSmoothing(AppState& s) {
+    sortData(s);
+    if (s.data.empty()) { s.smoothed.clear(); return; }
+    s.smoothed = localSmooth(s.data, s.windowSize, s.degree);
+}
+void recomputeAxes(AppState& s) {
+    if (s.data.empty()) { s.xmin = 0; s.xmax = 10; s.ymin = 0; s.ymax = 10; return; }
+    double xmin = s.data[0].x, xmax = s.data[0].x, ymin = s.data[0].y, ymax = s.data[0].y;
+    for (auto& p : s.data) {
+        xmin = std::min(xmin, p.x); xmax = std::max(xmax, p.x);
+        ymin = std::min(ymin, p.y); ymax = std::max(ymax, p.y);
+    }
+    for (double y : s.smoothed) { ymin = std::min(ymin, y); ymax = std::max(ymax, y); }
+    double dx = xmax - xmin, dy = ymax - ymin;
+    if (dx < 1e-9) dx = 1; if (dy < 1e-9) dy = 1;
+    s.xmin = xmin - 0.05 * dx; s.xmax = xmax + 0.05 * dx;
+    s.ymin = ymin - 0.10 * dy; s.ymax = ymax + 0.10 * dy;
+}
+void recomputeAll(AppState& s) { recomputeSmoothing(s); recomputeAxes(s); }
+
+bool tryParse(const std::string& s, double& out) {
+    if (s.empty()) return false;
+    try { size_t pos; out = std::stod(s, &pos); return pos == s.size(); }
+    catch (...) { return false; }
+}
+std::string filterNumeric(const std::string& s) {
+    std::string r;
+    for (char c : s)
+        if (std::isdigit((unsigned char)c) || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+            r += c;
+    return r;
+}
+void addPoint(AppState& s, double x, double y) {
+    s.data.push_back({ x, y, s.nextId++ });
+    recomputeAll(s);
+}
+void resetData(AppState& s) {
+    s.data = {
+        {0.0,0.02,0},{0.5,0.51,1},{1.0,0.88,2},{1.5,1.55,3},
+        {2.0,1.92,4},{2.5,2.60,5},{3.0,2.91,6},{3.5,3.62,7},
+        {4.0,3.95,8},{4.5,4.55,9},{5.0,4.90,10}
+    };
+    s.nextId = 11;
+    recomputeAll(s);
+}
+
+int main(int, char**) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::cerr << "SDL_Init: " << SDL_GetError() << "\n"; return 1;
+    }
+    AppState state;
+    state.fieldX.text = "1.0";
+    state.fieldY.text = "1.0";
+    resetData(state);
+
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    if (!SDL_CreateWindowAndRenderer("Local sglajiv",
+        1300, 800, SDL_WINDOW_RESIZABLE, &window, &renderer)) {
+        std::cerr << "Create failed: " << SDL_GetError() << "\n";
+        SDL_Quit(); return 1;
+    }
+    SDL_StartTextInput(window);
+
+    const float panelW = 340.f;
+    const float left = panelW + 20.f;
+    const float right = 40.f;
+    const float top = 110.f;
+    const float bottom = 70.f;
+    const float tableHeaderY = 90.f;
+    const float tableTop = 108.f;
+    const int   rowH = 22;
+    const float deleteX = panelW - 32.f;
+    const float deleteW = 24.f;
+
+    bool running = true;
+    while (running) {
+        int W = 0, H = 0;
+        SDL_GetWindowSize(window, &W, &H);
+        float plotW = W - left - right;
+        float plotH = H - top - bottom;
+
+        state.fieldX.rect = { 35.f,  H - 95.f, 85.f, 24.f };
+        state.fieldY.rect = { 160.f, H - 95.f, 85.f, 24.f };
+        state.addButtonRect = { 10.f,  H - 60.f, 100.f, 28.f };
+        state.clearButtonRect = { 120.f, H - 60.f, 100.f, 28.f };
+
+        int visibleRows = (H - 220 - (int)tableTop) / rowH;
+        if (visibleRows < 1) visibleRows = 1;
+
+        auto toScreen = [&](double x, double y) {
+            float sx = left + (float)((x - state.xmin) / (state.xmax - state.xmin) * plotW);
+            float sy = top + plotH - (float)((y - state.ymin) / (state.ymax - state.ymin) * plotH);
+            return SDL_FPoint{ sx, sy };
+        };
+        auto toWorld = [&](float sx, float sy) {
+            double wx = state.xmin + (sx - left) / plotW * (state.xmax - state.xmin);
+            double wy = state.ymin + (plotH - (sy - top)) / plotH * (state.ymax - state.ymin);
+            return std::pair<double, double>{wx, wy};
+        };
+        auto insidePlot = [&](float mx, float my) {
+            return mx >= left && mx <= left + plotW && my >= top && my <= top + plotH;
+        };
+        auto insidePanel = [&](float mx, float my) { return mx < panelW; };
+        auto insideRect = [&](const SDL_FRect& r, float mx, float my) {
+            return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+        };
+
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_EVENT_QUIT) { running = false; break; }
+
+            if (ev.type == SDL_EVENT_TEXT_INPUT && state.focusedField != 0) {
+                std::string add = filterNumeric(ev.text.text);
+                auto& f = (state.focusedField == 1) ? state.fieldX : state.fieldY;
+                if (!add.empty() && f.text.size() + add.size() <= 14) f.text += add;
+            }
+
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                if (state.focusedField != 0) {
+                    auto& f = (state.focusedField == 1) ? state.fieldX : state.fieldY;
+                    if (ev.key.key == SDLK_BACKSPACE && !f.text.empty()) f.text.pop_back();
+                    else if (ev.key.key == SDLK_ESCAPE) state.focusedField = 0;
+                    else if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER) {
+                        double x, y;
+                        if (tryParse(state.fieldX.text, x) && tryParse(state.fieldY.text, y)) {
+                            addPoint(state, x, y);
+                            state.fieldX.text.clear();
+                            state.fieldY.text.clear();
+                        }
+                        state.focusedField = 0;
+                    }
+                }
+                else {
+                    bool changed = false;
+                    switch (ev.key.key) {
+                    case SDLK_PLUS: case SDLK_EQUALS: case SDLK_KP_PLUS:
+                        state.windowSize = std::min(state.windowSize + 2, 21); changed = true; break;
+                    case SDLK_MINUS: case SDLK_KP_MINUS:
+                        state.windowSize = std::max(state.windowSize - 2, 3); changed = true; break;
+                    case SDLK_RIGHTBRACKET:
+                        state.degree = std::min(state.degree + 1, 5); changed = true; break;
+                    case SDLK_LEFTBRACKET:
+                        state.degree = std::max(state.degree - 1, 1); changed = true; break;
+                    case SDLK_R: resetData(state); break;
+                    case SDLK_C:
+                        state.data.clear(); state.scrollOffset = 0;
+                        recomputeAll(state); break;
+                    }
+                    if (changed) recomputeAll(state);
+                }
+            }
+
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                float mx = ev.button.x, my = ev.button.y;
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    if (insideRect(state.fieldX.rect, mx, my)) { state.focusedField = 1; continue; }
+                    if (insideRect(state.fieldY.rect, mx, my)) { state.focusedField = 2; continue; }
+                    if (insideRect(state.addButtonRect, mx, my)) {
+                        double x, y;
+                        if (tryParse(state.fieldX.text, x) && tryParse(state.fieldY.text, y)) {
+                            addPoint(state, x, y);
+                            state.fieldX.text.clear();
+                            state.fieldY.text.clear();
+                        }
+                        state.focusedField = 0; continue;
+                    }
+                    if (insideRect(state.clearButtonRect, mx, my)) {
+                        state.data.clear(); state.scrollOffset = 0;
+                        recomputeAll(state); state.focusedField = 0; continue;
+                    }
+                    if (insidePanel(mx, my) && my >= tableTop) {
+                        bool handled = false;
+                        int firstRow = state.scrollOffset;
+                        int lastRow = std::min((int)state.data.size(), firstRow + visibleRows);
+                        for (int i = firstRow; i < lastRow; ++i) {
+                            float ry = tableTop + (i - firstRow) * rowH;
+                            SDL_FRect del{ deleteX, ry + 2.f, deleteW, (float)(rowH - 4) };
+                            if (insideRect(del, mx, my)) {
+                                state.data.erase(state.data.begin() + i);
+                                recomputeAll(state); handled = true; break;
+                            }
+                        }
+                        if (handled) { state.focusedField = 0; continue; }
+                    }
+                    if (insidePlot(mx, my)) {
+                        state.focusedField = 0;
+                        int nearestId = -1; float bestD = 15.f;
+                        for (auto& p : state.data) {
+                            SDL_FPoint sp = toScreen(p.x, p.y);
+                            float d = std::hypot(sp.x - mx, sp.y - my);
+                            if (d < bestD) { bestD = d; nearestId = p.id; }
+                        }
+                        if (nearestId >= 0) state.draggedId = nearestId;
+                        else {
+                            auto [wx, wy] = toWorld(mx, my);
+                            addPoint(state, wx, wy);
+                            state.draggedId = state.nextId - 1;
+                        }
+                    }
+                    else state.focusedField = 0;
+                }
+                if (ev.button.button == SDL_BUTTON_RIGHT && insidePlot(mx, my)) {
+                    int nearestId = -1; float bestD = 15.f;
+                    for (auto& p : state.data) {
+                        SDL_FPoint sp = toScreen(p.x, p.y);
+                        float d = std::hypot(sp.x - mx, sp.y - my);
+                        if (d < bestD) { bestD = d; nearestId = p.id; }
+                    }
+                    if (nearestId >= 0) {
+                        state.data.erase(
+                            std::remove_if(state.data.begin(), state.data.end(),
+                                [nearestId](const Point& p) { return p.id == nearestId; }),
+                            state.data.end());
+                        if (state.draggedId == nearestId) state.draggedId = -1;
+                        recomputeAll(state);
+                    }
+                }
+            }
+
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP &&
+                ev.button.button == SDL_BUTTON_LEFT && state.draggedId >= 0) {
+                state.draggedId = -1;
+                recomputeAxes(state);
+            }
+
+            if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                float mx = ev.motion.x, my = ev.motion.y;
+                if (state.draggedId >= 0 && insidePlot(mx, my)) {
+                    auto [wx, wy] = toWorld(mx, my);
+                    for (auto& p : state.data)
+                        if (p.id == state.draggedId) { p.x = wx; p.y = wy; break; }
+                    recomputeSmoothing(state);
+                }
+                state.hoveredNodeId = -1;
+                state.hoveredRow = -1;
+                if (insidePlot(mx, my)) {
+                    float bestD = 12.f;
+                    for (auto& p : state.data) {
+                        SDL_FPoint sp = toScreen(p.x, p.y);
+                        float d = std::hypot(sp.x - mx, sp.y - my);
+                        if (d < bestD) { bestD = d; state.hoveredNodeId = p.id; }
+                    }
+                }
+                else if (insidePanel(mx, my) && my >= tableTop) {
+                    int firstRow = state.scrollOffset;
+                    int lastRow = std::min((int)state.data.size(), firstRow + visibleRows);
+                    for (int i = firstRow; i < lastRow; ++i) {
+                        float ry = tableTop + (i - firstRow) * rowH;
+                        if (my >= ry && my < ry + rowH && mx < deleteX) {
+                            state.hoveredRow = i;
+                            state.hoveredNodeId = state.data[i].id;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (ev.type == SDL_EVENT_MOUSE_WHEEL &&
+                insidePanel(ev.wheel.mouse_x, ev.wheel.mouse_y)) {
+                int maxScroll = std::max(0, (int)state.data.size() - visibleRows);
+                state.scrollOffset -= (ev.wheel.y > 0) ? 1 : -1;
+                state.scrollOffset = std::max(0, std::min(state.scrollOffset, maxScroll));
+            }
+        }
+
+        // ==================== РЕНДЕРИНГ ====================
+        SDL_SetRenderDrawColor(renderer, 245, 245, 245, 255);
+        SDL_RenderClear(renderer);
+
+        // Верхняя панель
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        fillRect(renderer, panelW, 0, (float)W - panelW, top);
+        SDL_SetRenderDrawColor(renderer, 200, 200, 200, 255);
+        SDL_RenderLine(renderer, panelW, top, (float)W, top);
+
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        std::string line1 = "Local sglajiv: win="
+            + std::to_string(state.windowSize)
+            + "  degree=" + std::to_string(state.degree)
+            + "  points=" + std::to_string(state.data.size());
+        SDL_RenderDebugText(renderer, left, 12, line1.c_str());
+
+        SDL_SetRenderDrawColor(renderer, 30, 100, 220, 255);
+        std::string localLine = "Local poly at node: ";
+        int nodeIdx = -1;
+        for (int i = 0; i < (int)state.data.size(); ++i)
+            if (state.data[i].id == state.hoveredNodeId) { nodeIdx = i; break; }
+        if (nodeIdx >= 0) {
+            auto c = localCoeffsAt(state.data, nodeIdx, state.windowSize, state.degree);
+            if (!c.empty()) {
+                std::ostringstream xi;
+                xi << std::fixed << std::setprecision(3) << state.data[nodeIdx].x;
+                localLine += "y = " + formatPolyEq(c, "t") +
+                    "   t = x - " + xi.str() +
+                    ",   y(xi) = " + fmtNum(state.smoothed[nodeIdx]);
+            }
+            else {
+                localLine += "QR degenerate (points too close / vertical)";
+            }
+        }
+        else {
+            localLine += "hover a node on the plot or a row in the table";
+        }
+        SDL_RenderDebugText(renderer, left, 40, localLine.c_str());
+
+        SDL_SetRenderDrawColor(renderer, 100, 100, 100, 255);
+        SDL_RenderDebugText(renderer, left, 70,
+            "Plot: LMB add/drag  RMB delete  +/- window  [ ] degree  R reset  C clear");
+
+        // Левая панель
+        SDL_SetRenderDrawColor(renderer, 232, 232, 236, 255);
+        fillRect(renderer, 0, 0, panelW, (float)H);
+        SDL_SetRenderDrawColor(renderer, 160, 160, 160, 255);
+        SDL_RenderLine(renderer, panelW, 0, panelW, (float)H);
+
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderDebugText(renderer, 10, 20, "Points table");
+        std::string params = "win=" + std::to_string(state.windowSize)
+            + "  deg=" + std::to_string(state.degree);
+        SDL_RenderDebugText(renderer, 10, 40, params.c_str());
+
+        SDL_RenderDebugText(renderer, 15, (int)tableHeaderY, "#");
+        SDL_RenderDebugText(renderer, 55, (int)tableHeaderY, "X");
+        SDL_RenderDebugText(renderer, 165, (int)tableHeaderY, "Y");
+        SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+        SDL_RenderLine(renderer, 5, tableTop - 4, panelW - 5, tableTop - 4);
+
+        int firstRow = state.scrollOffset;
+        int lastRow = std::min((int)state.data.size(), firstRow + visibleRows);
+        for (int i = firstRow; i < lastRow; ++i) {
+            float ry = tableTop + (i - firstRow) * rowH;
+            if (i == state.hoveredRow) {
+                SDL_SetRenderDrawColor(renderer, 205, 222, 255, 255);
+                fillRect(renderer, 4, ry, panelW - 8, (float)rowH);
+            }
+            else if (i % 2 == 0) {
+                SDL_SetRenderDrawColor(renderer, 240, 240, 242, 255);
+                fillRect(renderer, 4, ry, panelW - 8, (float)rowH);
+            }
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            std::ostringstream oss;
+            oss << i;
+            SDL_RenderDebugText(renderer, 15, (int)ry + 6, oss.str().c_str());
+            oss.str(""); oss << std::fixed << std::setprecision(3) << state.data[i].x;
+            SDL_RenderDebugText(renderer, 55, (int)ry + 6, oss.str().c_str());
+            oss.str(""); oss << std::fixed << std::setprecision(3) << state.data[i].y;
+            SDL_RenderDebugText(renderer, 165, (int)ry + 6, oss.str().c_str());
+
+            SDL_SetRenderDrawColor(renderer, 210, 80, 80, 255);
+            fillRect(renderer, deleteX, ry + 2, deleteW, (float)(rowH - 4));
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer, (int)deleteX + 8, (int)ry + 6, "x");
+        }
+
+        if ((int)state.data.size() > visibleRows) {
+            float total = (float)state.data.size();
+            float ratio = visibleRows / total;
+            float barH = (visibleRows * rowH) * ratio;
+            float maxBarY = visibleRows * rowH - barH;
+            float barY = tableTop + maxBarY *
+                (state.scrollOffset / std::max(1.f, total - visibleRows));
+            SDL_SetRenderDrawColor(renderer, 180, 180, 180, 255);
+            fillRect(renderer, panelW - 5, barY, 3, barH);
+        }
+
+        // Поля ввода
+        float inY = H - 95.f;
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderDebugText(renderer, 10, (int)inY - 18, "Add node:");
+        SDL_RenderDebugText(renderer, 10, (int)inY + 6, "X:");
+        SDL_RenderDebugText(renderer, 135, (int)inY + 6, "Y:");
+        auto drawField = [&](const InputField& f, bool focused) {
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            fillRect(renderer, f.rect.x, f.rect.y, f.rect.w, f.rect.h);
+            if (focused) SDL_SetRenderDrawColor(renderer, 30, 100, 220, 255);
+            else         SDL_SetRenderDrawColor(renderer, 110, 110, 110, 255);
+            drawRect(renderer, f.rect.x, f.rect.y, f.rect.w, f.rect.h);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            std::string disp = f.text;
+            if (disp.size() > 10) disp = disp.substr(disp.size() - 10);
+            SDL_RenderDebugText(renderer, (int)f.rect.x + 4, (int)f.rect.y + 8, disp.c_str());
+            if (focused) {
+                int caretX = (int)f.rect.x + 4 + (int)disp.size() * 8 + 1;
+                SDL_SetRenderDrawColor(renderer, 30, 100, 220, 255);
+                SDL_RenderLine(renderer, caretX, f.rect.y + 4, caretX, f.rect.y + f.rect.h - 4);
+            }
+        };
+        drawField(state.fieldX, state.focusedField == 1);
+        drawField(state.fieldY, state.focusedField == 2);
+
+        SDL_SetRenderDrawColor(renderer, 90, 175, 95, 255);
+        fillRect(renderer, state.addButtonRect.x, state.addButtonRect.y,
+            state.addButtonRect.w, state.addButtonRect.h);
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        SDL_RenderDebugText(renderer, (int)state.addButtonRect.x + 33,
+            (int)state.addButtonRect.y + 10, "Add");
+
+        SDL_SetRenderDrawColor(renderer, 190, 100, 100, 255);
+        fillRect(renderer, state.clearButtonRect.x, state.clearButtonRect.y,
+            state.clearButtonRect.w, state.clearButtonRect.h);
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        SDL_RenderDebugText(renderer, (int)state.clearButtonRect.x + 33,
+            (int)state.clearButtonRect.y + 10, "Clear");
+
+        // График
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        fillRect(renderer, left, top, plotW, plotH);
+
+        double xStep = niceStep(state.xmax - state.xmin, 10);
+        double yStep = niceStep(state.ymax - state.ymin, 8);
+        SDL_SetRenderDrawColor(renderer, 220, 220, 220, 255);
+        for (double xv = std::ceil(state.xmin / xStep) * xStep;
+            xv <= state.xmax + 1e-9; xv += xStep) {
+            float sx = toScreen(xv, state.ymin).x;
+            SDL_RenderLine(renderer, sx, top, sx, top + plotH);
+        }
+        for (double yv = std::ceil(state.ymin / yStep) * yStep;
+            yv <= state.ymax + 1e-9; yv += yStep) {
+            float sy = toScreen(state.xmin, yv).y;
+            SDL_RenderLine(renderer, left, sy, left + plotW, sy);
+        }
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        drawRect(renderer, left, top, plotW, plotH);
+
+        for (double xv = std::ceil(state.xmin / xStep) * xStep;
+            xv <= state.xmax + 1e-9; xv += xStep) {
+            float sx = toScreen(xv, state.ymin).x;
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(
+                std::max(0, -(int)std::floor(std::log10(xStep))));
+            ss << xv;
+            SDL_RenderDebugText(renderer, sx - 15.f, top + plotH + 6.f, ss.str().c_str());
+        }
+        for (double yv = std::ceil(state.ymin / yStep) * yStep;
+            yv <= state.ymax + 1e-9; yv += yStep) {
+            float sy = toScreen(state.xmin, yv).y;
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(
+                std::max(0, -(int)std::floor(std::log10(yStep))));
+            ss << yv;
+            std::string label = ss.str();
+            int textW = (int)label.size() * 8;
+            SDL_RenderDebugText(renderer, left - 8.f - textW, sy - 8.f, label.c_str());
+        }
+
+        if (state.smoothed.size() >= 2) {
+            std::vector<SDL_FPoint> curve;
+            for (size_t i = 0; i < state.smoothed.size(); ++i)
+                curve.push_back(toScreen(state.data[i].x, state.smoothed[i]));
+            SDL_SetRenderDrawColor(renderer, 30, 100, 220, 255);
+            SDL_RenderLines(renderer, curve.data(), (int)curve.size());
+        }
+
+        for (auto& p : state.data) {
+            SDL_FPoint sp = toScreen(p.x, p.y);
+            if (p.id == state.draggedId)
+                SDL_SetRenderDrawColor(renderer, 255, 150, 0, 255);
+            else if (p.id == state.hoveredNodeId)
+                SDL_SetRenderDrawColor(renderer, 255, 80, 200, 255);
+            else
+                SDL_SetRenderDrawColor(renderer, 220, 40, 40, 255);
+            fillRect(renderer, sp.x - 5.f, sp.y - 5.f, 10.f, 10.f);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            drawRect(renderer, sp.x - 5.f, sp.y - 5.f, 10.f, 10.f);
+        }
+
+        // Легенда
+        float lx = left + plotW - 130.f;
+        float ly = top + 12.f;
+        SDL_SetRenderDrawColor(renderer, 220, 40, 40, 255);
+        fillRect(renderer, lx, ly, 10, 10);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderDebugText(renderer, (int)lx + 15, (int)ly + 1, "data");
+        SDL_SetRenderDrawColor(renderer, 30, 100, 220, 255);
+        SDL_RenderLine(renderer, lx, ly + 22, lx + 10, ly + 22);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderDebugText(renderer, (int)lx + 15, (int)ly + 18, "smoothed");
+
+        SDL_RenderPresent(renderer);
+        SDL_Delay(16);
+    }
+
+    SDL_StopTextInput(window);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
